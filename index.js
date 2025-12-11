@@ -12,7 +12,7 @@ client.on('ready', () => {
     client.user.setPresence({
         activities: [
             {
-                name: "Sunucuyu izliyor...",
+                name: "Yakında en iyi şekilde geleceğim...",
                 type: ActivityType.Watching
             }
         ],
@@ -22,4 +22,5 @@ client.on('ready', () => {
 
 // BURAYA YENİ TOKENINI YAZ
 client.login(process.env.TOKEN);
+
 
