@@ -1,3 +1,6 @@
+// Koyeb health check için mini HTTP server
+const http = require('http');
+http.createServer((req, res) => res.end("OK")).listen(process.env.PORT || 3000);
 const { Client, GatewayIntentBits, ActivityType } = require('discord.js');
 
 // İstemciyi oluştur
@@ -22,5 +25,6 @@ client.on('ready', () => {
 
 // BURAYA YENİ TOKENINI YAZ
 client.login(process.env.TOKEN);
+
 
 
