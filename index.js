@@ -17,8 +17,8 @@ client.on("messageCreate", async (message) => {
 
   // 🔐 YETKİLİ ROL ID'LERİ
   const ALLOWED_ROLE_IDS = [
-    "ROLE_ID_1", // Boyka
-    "ROLE_ID_2"  // Admin
+    "1074347907685294118", // Boyka
+    "1434952508094152804"  // Admin
   ];
 
   const hasPermission = message.member?.roles?.cache?.some(role =>
@@ -49,6 +49,7 @@ client.on('ready', () => {
 
 // BURAYA YENİ TOKENINI YAZ
 client.login(process.env.TOKEN);
+
 
 
 
