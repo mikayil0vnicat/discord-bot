@@ -13,25 +13,23 @@ const client = new Client({
 });
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
+  if (message.content !== "!durum") return;
 
-  // Sadece sunucuda çalışsın
-  if (!message.guild) return;
-
-  // YETKİLİ ROL ID'LERİ
-  const allowedRoleIds = [
-    "1074347907685294118",
-    "1434952508094152804"
+  // 🔐 YETKİLİ ROL ID'LERİ
+  const ALLOWED_ROLE_IDS = [
+    "ROLE_ID_1", // Boyka
+    "ROLE_ID_2"  // Admin
   ];
 
-  const hasAccess = message.member.roles.cache.hasAny(...allowedRoleIds);
-  if (!hasAccess) {
-    return message.reply("❌ Bu komutu kullanma yetkin yok.");
-  }
+  const hasPermission = message.member?.roles?.cache?.some(role =>
+    ALLOWED_ROLE_IDS.includes(role.id)
+  );
 
-  if (message.content.trim() === "!durum") {
-    return message.reply("✈️ Take-off checklist complete.");
-  }
+  if (!hasPermission) return; // ❌ yetkisizse sessizce yok say
+
+  return message.reply("✈️ Take-off checklist complete.");
 });
+
 
 
 // Bot hazır olunca çalışır
@@ -51,6 +49,7 @@ client.on('ready', () => {
 
 // BURAYA YENİ TOKENINI YAZ
 client.login(process.env.TOKEN);
+
 
 
 
