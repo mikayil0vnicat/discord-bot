@@ -13,19 +13,23 @@ const client = new Client({
 });
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
+
+  // Sadece sunucuda çalışsın
   if (!message.guild) return;
 
-  // SADECE BU ROLLER KULLANABİLİR
-  const allowedRoles = ["1074347907685294118", "1434952508094152804", "1074347907685294116"];
+  // YETKİLİ ROL ID'LERİ
+  const allowedRoleIds = [
+    "BURAYA_ROLE_ID_1",
+    "BURAYA_ROLE_ID_2"
+  ];
 
-  const hasAccess = message.member.roles.cache.some(role =>
-    allowedRoles.includes(role.name)
-  );
+  const hasAccess = message.member.roles.cache.hasAny(...allowedRoleIds);
+  if (!hasAccess) {
+    return message.reply("❌ Bu komutu kullanma yetkin yok.");
+  }
 
-  if (!hasAccess) return;
-
-  if (message.content === "!durum") {
-    message.reply("✈ Take-off checklist complete.");
+  if (message.content.trim() === "!durum") {
+    return message.reply("✈️ Take-off checklist complete.");
   }
 });
 
@@ -47,6 +51,7 @@ client.on('ready', () => {
 
 // BURAYA YENİ TOKENINI YAZ
 client.login(process.env.TOKEN);
+
 
 
 
