@@ -11,13 +11,24 @@ const client = new Client({
     GatewayIntentBits.MessageContent
   ]
 });
-client.on("messageCreate", (message) => {
+client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
+  if (!message.guild) return;
+
+  // SADECE BU ROLLER KULLANABİLİR
+  const allowedRoles = ["1074347907685294118", "1434952508094152804", "1074347907685294116"];
+
+  const hasAccess = message.member.roles.cache.some(role =>
+    allowedRoles.includes(role.name)
+  );
+
+  if (!hasAccess) return;
 
   if (message.content === "!durum") {
-    message.reply("✈️ Take-off checklist complete.");
+    message.reply("✈ Take-off checklist complete.");
   }
 });
+
 
 // Bot hazır olunca çalışır
 client.on('ready', () => {
@@ -36,6 +47,7 @@ client.on('ready', () => {
 
 // BURAYA YENİ TOKENINI YAZ
 client.login(process.env.TOKEN);
+
 
 
 
