@@ -5,7 +5,18 @@ const { Client, GatewayIntentBits, ActivityType } = require('discord.js');
 
 // İstemciyi oluştur
 const client = new Client({
-    intents: [GatewayIntentBits.Guilds]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
+  ]
+});
+client.on("messageCreate", (message) => {
+  if (message.author.bot) return;
+
+  if (message.content === "!durum") {
+    message.reply("✈️ Take-off checklist complete.");
+  }
 });
 
 // Bot hazır olunca çalışır
@@ -25,6 +36,7 @@ client.on('ready', () => {
 
 // BURAYA YENİ TOKENINI YAZ
 client.login(process.env.TOKEN);
+
 
 
 
