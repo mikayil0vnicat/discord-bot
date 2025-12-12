@@ -31,9 +31,14 @@ client.on("messageCreate", async (message) => {
     ALLOWED_ROLE_IDS.includes(role.id)
   );
 
-  if (!hasPermission) {
-    return message.reply("❌ Bu komutu kullanmaya yetkin yok.");
-  }
+  const prefix = "!";
+
+// Komut değilse SUS
+if (!message.content.startsWith(prefix)) return;
+
+// Komutsa ve yetkisi yoksa uyar
+if (!hasPermission) return message.reply("❌ Bu komutu kullanmaya yetkin yok.");
+
 
   // 🧪 3️⃣ KOMUTLAR
   if (message.content === "!durum") {
@@ -57,6 +62,7 @@ client.on('ready', () => {
 
 // BURAYA YENİ TOKENINI YAZ
 client.login(process.env.TOKEN);
+
 
 
 
