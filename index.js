@@ -13,25 +13,33 @@ const client = new Client({
 });
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
-  if (message.content !== "!durum") return;
 
-  // 🔐 YETKİLİ ROL ID'LERİ
+  // 🔴 1️⃣ MEE6 LOG KANALI KONTROLÜ (HERKES İÇİN)
+  if (message.channelId === process.env.MEE6_LOG_CHANNEL_ID) {
+    console.log("📌 MEE6 LOG MESAJI ALGILANDI");
+    // ileride buraya parse + kayıt gelecek
+    return;
+  }
+
+  // 🔐 2️⃣ YETKILI ROL ID'LERI
   const ALLOWED_ROLE_IDS = [
-    "1074347907685294118", // Boyka
-    "1434952508094152804"  // Admin
+    "1074347907652941183", // Boyka
+    "1434952508904152804"  // Admin
   ];
 
-  const hasPermission = message.member?.roles?.cache?.some(role =>
+  const hasPermission = message.member?.roles.cache.some(role =>
     ALLOWED_ROLE_IDS.includes(role.id)
   );
 
-  if (!hasPermission) return; // ❌ yetkisizse sessizce yok say
+  if (!hasPermission) {
+    return message.reply("❌ Bu komutu kullanmaya yetkin yok.");
+  }
 
-  return message.reply("✈️ Take-off checklist complete.");
+  // 🧪 3️⃣ KOMUTLAR
+  if (message.content === "!durum") {
+    return message.reply("✈️ Take-off checklist complete.");
+  }
 });
-
-
-
 // Bot hazır olunca çalışır
 client.on('ready', () => {
     console.log(client.user.tag + " aktif!");
@@ -49,6 +57,7 @@ client.on('ready', () => {
 
 // BURAYA YENİ TOKENINI YAZ
 client.login(process.env.TOKEN);
+
 
 
 
