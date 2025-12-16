@@ -1,30 +1,38 @@
+/*************************
+ * Koyeb HTTP Healthcheck
+ *************************/
 const http = require("http");
-const fs = require("fs");
-const path = require("path");
-const { Client, GatewayIntentBits, Partials, Events, EmbedBuilder } = require("discord.js");
-
-/* ===============================
-   Koyeb Healthcheck (HTTP)
-================================ */
 const PORT = process.env.PORT || 3000;
-http
-  .createServer((req, res) => {
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("OK");
-  })
-  .listen(PORT, () => console.log(`🌐 HTTP server listening on ${PORT}`));
 
-/* ===============================
-   ENV
-================================ */
+http.createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("OK");
+}).listen(PORT, () => {
+  console.log(`🌐 HTTP server listening on ${PORT}`);
+});
+
+/*************************
+ * Discord + Postgres
+ *************************/
+const { Client, GatewayIntentBits, Partials, Events, EmbedBuilder } = require("discord.js");
+const { Pool } = require("pg");
+
+/*************************
+ * ENV
+ *************************/
+const TOKEN = process.env.TOKEN;
 const LOG_CHANNEL_ID = process.env.MEE6_LOG_CHANNEL_ID;
+const DATABASE_URL = process.env.DATABASE_URL;
 
-/* ===============================
-   Yetkili Roller
-   Sadece bu roller: !sicil / !sicilsil
-   Yetkisize HİÇ cevap yok (sessiz).
-================================ */
-const SICIL_ALLOWED_ROLE_IDS = [
+if (!TOKEN || !LOG_CHANNEL_ID || !DATABASE_URL) {
+  console.error("❌ ENV eksik (TOKEN / MEE6_LOG_CHANNEL_ID / DATABASE_URL)");
+  process.exit(1);
+}
+
+/*************************
+ * Yetkili Roller
+ *************************/
+const AUTHORIZED_ROLES = [
   "1074347907685294118",
   "1101398761923674152",
   "1074347907685294116",
@@ -32,336 +40,178 @@ const SICIL_ALLOWED_ROLE_IDS = [
   "1434952508094152804",
 ];
 
-/* ===============================
-   Storage (NDJSON)
-================================ */
-const DATA_DIR = path.join(__dirname, "data");
-const ACTIONS_FILE = path.join(DATA_DIR, "actions.ndjson");
-const RAW_FILE = path.join(DATA_DIR, "mee6_raw.ndjson");
+/*************************
+ * DB Pool
+ *************************/
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
 
-function appendJsonLine(file, obj) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.appendFileSync(file, JSON.stringify(obj) + "\n", "utf8");
-}
-
-function safeReadNdjson(file) {
-  if (!fs.existsSync(file)) return [];
-  const txt = fs.readFileSync(file, "utf8").trim();
-  if (!txt) return [];
-  return txt
-    .split("\n")
-    .filter(Boolean)
-    .map((l) => {
-      try {
-        return JSON.parse(l);
-      } catch {
-        return null;
-      }
-    })
-    .filter(Boolean);
-}
-
-/* ===============================
-   Utils
-================================ */
-function extractMentionId(str) {
-  if (!str) return null;
-  const m = String(str).match(/<@!?(\d{15,25})>/);
-  return m ? m[1] : null;
-}
-
-function fieldsToMap(embed) {
-  const map = {};
-  for (const f of embed.fields || []) {
-    const key = (f.name || "").trim().toLowerCase();
-    map[key] = (f.value || "").trim();
+(async () => {
+  try {
+    await pool.query("SELECT 1");
+    console.log("✅ DB OK");
+  } catch (e) {
+    console.error("❌ DB bağlantı hatası", e);
+    process.exit(1);
   }
-  return map;
-}
+})();
 
-function detectActionType(embed) {
-  const title = (embed.title || "").toLowerCase();
-  const desc = (embed.description || "").toLowerCase();
-  const authorName = (embed.author?.name || "").toLowerCase();
-  const footer = (embed.footer?.text || "").toLowerCase();
-  const haystack = `${authorName}\n${title}\n${desc}\n${footer}`;
-
-  // UNMUTE (istersen sicilde ayrı gösteririz)
-  if (haystack.includes("unmute")) return "UNMUTE";
-
-  // MUTE / TIMEOUT
-  if (
-    haystack.includes("mute") ||
-    haystack.includes("muted") ||
-    haystack.includes("timeout") ||
-    haystack.includes("time out") ||
-    haystack.includes("sustur") ||
-    haystack.includes("susturuldu") ||
-    haystack.includes("susturma")
-  ) {
-    return "MUTE";
-  }
-
-  // WARN
-  if (
-    haystack.includes("[warn]") ||
-    haystack.includes("warn") ||
-    haystack.includes("warning") ||
-    haystack.includes("uyarı") ||
-    haystack.includes("uyari") ||
-    haystack.includes("uyg")
-  ) {
-    return "WARN";
-  }
-
-  return "UNKNOWN";
-}
-
-function parseMee6Embed(message) {
-  if (!message.embeds?.length) return null;
-
-  for (const e of message.embeds) {
-    const fm = fieldsToMap(e);
-
-    // Senin MEE6 log formatın:
-    // Kullanıcı / Moderatör / Neden (+ bazen Süre)
-    const userVal = fm["kullanıcı"] || fm["kullanici"] || null;
-    const modVal = fm["moderatör"] || fm["moderator"] || null;
-    const reasonVal = fm["neden"] || fm["sebep"] || null;
-    const durationVal = fm["süre"] || fm["sure"] || null;
-
-    const userId = extractMentionId(userVal);
-    const moderatorId = extractMentionId(modVal);
-
-    // Bu embed bizim format değilse geç
-    if (!userId && !moderatorId && !reasonVal && !durationVal) continue;
-
-    return {
-      actionType: detectActionType(e),
-      userId,
-      moderatorId,
-      reason: reasonVal || null,
-      duration: durationVal || null,
-      embedTitle: e.title || null,
-      embedAuthor: e.author?.name || null,
-      embedDesc: e.description || null,
-      embedFooter: e.footer?.text || null,
-    };
-  }
-
-  return null;
-}
-
-async function isAuthorized(message) {
-  if (!message.guild) return false;
-
-  let member = message.member;
-  if (!member) {
-    try {
-      member = await message.guild.members.fetch(message.author.id);
-    } catch {
-      return false;
-    }
-  }
-
-  const roles = member.roles?.cache;
-  if (!roles) return false;
-
-  return SICIL_ALLOWED_ROLE_IDS.some((id) => roles.has(id));
-}
-
-/* ===============================
-   Discord Client
-================================ */
+/*************************
+ * Discord Client
+ *************************/
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent, // log okumak için
-    GatewayIntentBits.GuildMembers,   // rol kontrolü için
+    GatewayIntentBits.MessageContent,
   ],
   partials: [Partials.Channel, Partials.Message],
 });
 
-process.on("unhandledRejection", (err) => console.error("[unhandledRejection]", err));
-process.on("uncaughtException", (err) => console.error("[uncaughtException]", err));
-
+/*************************
+ * Ready
+ *************************/
 client.once(Events.ClientReady, () => {
   console.log(`✅ Bot ayakta: ${client.user.tag}`);
-  console.log(`🧩 MEE6_LOG_CHANNEL_ID: ${LOG_CHANNEL_ID || "YOK"}`);
-  console.log(`🛡️ Sicil yetkili roller: ${SICIL_ALLOWED_ROLE_IDS.length} adet`);
+  console.log(`🧩 MEE6_LOG_CHANNEL_ID: ${LOG_CHANNEL_ID}`);
+  console.log(`🛂 Sicil yetkili roller: ${AUTHORIZED_ROLES.length} adet`);
 });
 
-/* ===============================
-   Main
-================================ */
-client.on(Events.MessageCreate, async (message) => {
+/*************************
+ * Utils
+ *************************/
+function hasPermission(member) {
+  return member.roles.cache.some(r => AUTHORIZED_ROLES.includes(r.id));
+}
+
+function extractId(text) {
+  if (!text) return null;
+  const m = text.match(/\d{17,19}/);
+  return m ? m[0] : null;
+}
+
+/*************************
+ * MEE6 LOG COLLECTOR
+ *************************/
+client.on(Events.MessageCreate, async (msg) => {
+  if (msg.channelId !== LOG_CHANNEL_ID) return;
+  if (!msg.embeds.length) return;
+
+  const embed = msg.embeds[0];
+  const title = embed.title || "";
+  const fields = embed.fields || [];
+
+  const userId = extractId(fields.find(f => f.name.toLowerCase().includes("kullanıcı"))?.value);
+  const modId  = extractId(fields.find(f => f.name.toLowerCase().includes("moderatör"))?.value);
+  const reason = fields.find(f => f.name.toLowerCase().includes("neden"))?.value || "-";
+  const duration = fields.find(f => f.name.toLowerCase().includes("süre"))?.value || null;
+
+  let actionType = null;
+
+  if (title.includes("WARN")) actionType = "WARN";
+  else if (title.includes("MUTE")) actionType = "MUTE";
+  else if (title.includes("UNMUTE")) actionType = "UNMUTE";
+  else return;
+
   try {
-    const content = (message.content || "").trim();
+    await pool.query(
+      `INSERT INTO actions
+       (guild_id, message_id, ts, source, action_type, user_id, moderator_id, reason, duration, embed_title)
+       VALUES ($1,$2,NOW(),'MEE6',$3,$4,$5,$6,$7,$8)
+       ON CONFLICT (message_id) DO NOTHING`,
+      [
+        msg.guildId,
+        msg.id,
+        actionType,
+        userId,
+        modId,
+        reason,
+        duration,
+        title,
+      ]
+    );
 
-    /* -------- Komutlar: SADECE İNSAN -------- */
-    if (!message.author?.bot) {
-      // !sicil @uye
-      if (content.toLowerCase().startsWith("!sicil")) {
-        const ok = await isAuthorized(message);
-        if (!ok) return; // ✅ yetkisize sessiz
-
-        const target = message.mentions.users.first();
-        if (!target) {
-          await message.reply("Kullanım: `!sicil @uye`");
-          return;
-        }
-
-        const records = safeReadNdjson(ACTIONS_FILE);
-
-        // manuel iptaller
-        const revokedIds = new Set(
-          records
-            .filter((r) => r.guildId === message.guildId && r.actionType === "REVOKE_MANUAL" && r.refMessageId)
-            .map((r) => r.refMessageId)
-        );
-
-        // kullanıcı kayıtları (iptaller hariç)
-        const userRecs = records
-          .filter((r) => r.guildId === message.guildId && r.userId === target.id)
-          .filter((r) => !revokedIds.has(r.messageId))
-          .sort((a, b) => (b.ts || "").localeCompare(a.ts || ""));
-
-        const warnCount = userRecs.filter((r) => r.actionType === "WARN").length;
-        const muteCount = userRecs.filter((r) => r.actionType === "MUTE").length;
-
-        const last = userRecs.slice(0, 10);
-
-        const desc = last.length
-          ? last
-              .map((r, i) => {
-                const when = r.ts ? new Date(r.ts).toLocaleString("tr-TR") : "bilinmiyor";
-                const mod = r.moderatorId ? `<@${r.moderatorId}>` : "bilinmiyor";
-                const reason = r.reason || "—";
-                const dur = r.duration ? ` • Süre: ${r.duration}` : "";
-                const type = r.actionType || "UNKNOWN";
-                return `**${i + 1}.** ${when} • **${type}** • Mod: ${mod} • Neden: ${reason}${dur}\n🆔 \`${r.messageId}\``;
-              })
-              .join("\n")
-          : "Kayıt yok.";
-
-        const embed = new EmbedBuilder()
-          .setTitle(`Sicil: ${target.username}`)
-          .setDescription(desc)
-          .addFields(
-            { name: "Toplam WARN", value: String(warnCount), inline: true },
-            { name: "Toplam MUTE", value: String(muteCount), inline: true },
-            { name: "Toplam Kayıt", value: String(userRecs.length), inline: true }
-          );
-
-        await message.reply({ embeds: [embed] });
-        return;
-      }
-
-      // !sicilsil <LOG_MESSAGE_ID> [neden]
-      if (content.toLowerCase().startsWith("!sicilsil")) {
-        const ok = await isAuthorized(message);
-        if (!ok) return; // ✅ yetkisize sessiz
-
-        const parts = content.split(/\s+/);
-        const refMessageId = parts[1];
-        const reason = parts.slice(2).join(" ").trim() || null;
-
-        if (!refMessageId || !/^\d{15,25}$/.test(refMessageId)) {
-          await message.reply("Kullanım: `!sicilsil <LOG_MESSAGE_ID> [neden]`");
-          return;
-        }
-
-        const records = safeReadNdjson(ACTIONS_FILE);
-
-        // bu ID ile kayıt var mı?
-        const exists = records.find((r) => r.guildId === message.guildId && r.messageId === refMessageId);
-        if (!exists) {
-          await message.reply("❌ Bu ID ile kayıt bulunamadı. (Sicilde görünen 🆔 ID’yi kopyala)");
-          return;
-        }
-
-        // zaten iptal edilmiş mi?
-        const already = records.some(
-          (r) => r.guildId === message.guildId && r.actionType === "REVOKE_MANUAL" && r.refMessageId === refMessageId
-        );
-        if (already) {
-          await message.reply("⚠️ Bu kayıt zaten kaldırılmış.");
-          return;
-        }
-
-        // iptal kaydı ekle
-        appendJsonLine(ACTIONS_FILE, {
-          ts: new Date().toISOString(),
-          guildId: message.guildId,
-          source: "MANUAL",
-          actionType: "REVOKE_MANUAL",
-          refMessageId,
-          moderatorId: message.author.id,
-          reason,
-        });
-
-        await message.reply(`✅ Kayıt kaldırıldı. (ID: \`${refMessageId}\`)`);
-        return;
-      }
-    }
-
-    /* -------- Collector: LOG KANALI (BOT/WEBHOOK dahil) -------- */
-    if (!LOG_CHANNEL_ID) return;
-    if (message.channelId !== LOG_CHANNEL_ID) return;
-
-    // Ham kaydı tut (debug)
-    appendJsonLine(RAW_FILE, {
-      ts: new Date().toISOString(),
-      guildId: message.guildId,
-      channelId: message.channelId,
-      messageId: message.id,
-      authorTag: message.author?.tag ?? null,
-      isBot: Boolean(message.author?.bot),
-      isWebhook: Boolean(message.webhookId),
-      embeds: (message.embeds || []).map((e) => ({
-        title: e.title ?? null,
-        description: e.description ?? null,
-        author: e.author?.name ?? null,
-        footer: e.footer?.text ?? null,
-        fields: (e.fields || []).map((f) => ({ name: f.name, value: f.value, inline: f.inline })),
-      })),
-      content: message.content ?? "",
-    });
-
-    const parsed = parseMee6Embed(message);
-    if (parsed && parsed.userId) {
-      const rec = {
-        ts: new Date().toISOString(),
-        guildId: message.guildId,
-        messageId: message.id, // ✅ sicilsil bununla çalışır
-        source: "MEE6",
-        ...parsed,
-      };
-
-      appendJsonLine(ACTIONS_FILE, rec);
-
-      console.log(
-        "✅ ACTION SAVED:",
-        rec.actionType,
-        "user:",
-        rec.userId,
-        "mod:",
-        rec.moderatorId || "?",
-        "reason:",
-        rec.reason || "-"
-      );
-    }
-  } catch (err) {
-    console.error("[MessageCreate ERROR]", err);
+    console.log(`✅ ACTION SAVED: ${actionType} user:${userId} mod:${modId}`);
+  } catch (e) {
+    console.error("❌ ACTION SAVE ERROR", e);
   }
 });
 
-/* ===============================
-   Login
-================================ */
-if (!process.env.TOKEN) {
-  console.error("❌ TOKEN yok (Koyeb Environment Variables)");
-  process.exit(1);
-}
-client.login(process.env.TOKEN);
+/*************************
+ * COMMANDS
+ *************************/
+client.on(Events.MessageCreate, async (msg) => {
+  if (!msg.guild || msg.author.bot) return;
+  if (!msg.content.startsWith("!")) return;
+
+  const args = msg.content.slice(1).trim().split(/\s+/);
+  const cmd = args.shift().toLowerCase();
+
+  if (!hasPermission(msg.member)) {
+    return;
+  }
+
+  /******** !sicil ********/
+  if (cmd === "sicil") {
+    const target = msg.mentions.users.first();
+    if (!target) return msg.reply("Kullanım: `!sicil @üye`");
+
+    const res = await pool.query(
+      `SELECT * FROM actions
+       WHERE guild_id=$1 AND user_id=$2
+       ORDER BY ts DESC`,
+      [msg.guildId, target.id]
+    );
+
+    if (!res.rows.length) {
+      return msg.reply("Kayıt yok.");
+    }
+
+    let warn = 0, mute = 0;
+    const lines = res.rows.map((r, i) => {
+      if (r.action_type === "WARN") warn++;
+      if (r.action_type === "MUTE") mute++;
+      return `**${i + 1}.** ${new Date(r.ts).toLocaleString()}
+• **${r.action_type}**
+• Mod: <@${r.moderator_id || "UNKNOWN"}>
+• Neden: ${r.reason || "-"}
+🆔 \`${r.message_id}\``;
+    });
+
+    const embed = new EmbedBuilder()
+      .setTitle(`Sicil: ${target.username}`)
+      .setDescription(lines.join("\n\n"))
+      .addFields(
+        { name: "Toplam WARN", value: String(warn), inline: true },
+        { name: "Toplam MUTE", value: String(mute), inline: true },
+        { name: "Toplam Kayıt", value: String(res.rows.length), inline: true },
+      );
+
+    return msg.reply({ embeds: [embed] });
+  }
+
+  /******** !sicilsil ********/
+  if (cmd === "sicilsil") {
+    const messageId = args[0];
+    if (!messageId) return msg.reply("Kullanım: `!sicilsil <LOG_MESSAGE_ID>`");
+
+    const del = await pool.query(
+      `DELETE FROM actions
+       WHERE guild_id=$1 AND message_id=$2`,
+      [msg.guildId, messageId]
+    );
+
+    if (!del.rowCount) {
+      return msg.reply("Bu ID ile kayıt bulunamadı.");
+    }
+
+    return msg.reply(`🗑️ Sicil silindi: \`${messageId}\``);
+  }
+});
+
+/*************************
+ * Login
+ *************************/
+client.login(TOKEN);
