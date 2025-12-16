@@ -7,7 +7,6 @@ const { Client, GatewayIntentBits, Partials, Events, EmbedBuilder } = require("d
    Koyeb Healthcheck (HTTP)
 ================================ */
 const PORT = process.env.PORT || 3000;
-
 http
   .createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "text/plain" });
@@ -23,11 +22,11 @@ http
 const LOG_CHANNEL_ID = process.env.MEE6_LOG_CHANNEL_ID;
 
 /* ===============================
-   Yetkili Roller
+   Yetkili Roller (ID)
 ================================ */
 const ROLE_YONETIM = "601898693448433666";
 const ROLE_MOD = "984473220801507398";
-const ROLE_EXTRA = "1074347907685294118"; // ✅ yeni eklenen rol
+const ROLE_EXTRA = "1074347907685294118"; // senin ekle dediğin
 
 /* ===============================
    Utils
@@ -52,13 +51,50 @@ function fieldsToMap(embed) {
   return map;
 }
 
-// MEE6 embedinden "action" çıkar
+function detectActionType(embed) {
+  const title = (embed.title || "").toLowerCase();
+  const desc = (embed.description || "").toLowerCase();
+  const authorName = (embed.author?.name || "").toLowerCase();
+  const footer = (embed.footer?.text || "").toLowerCase();
+
+  // MEE6 bazen action'ı title'da, bazen author'da, bazen desc/footer'da verir
+  const haystack = `${authorName}\n${title}\n${desc}\n${footer}`;
+
+  // MUTE/TIMEOUT önce kontrol (bazı metinlerde warn kelimesi de geçebiliyor)
+  if (
+    haystack.includes("mute") ||
+    haystack.includes("muted") ||
+    haystack.includes("timeout") ||
+    haystack.includes("time out") ||
+    haystack.includes("sustur") ||
+    haystack.includes("susturuldu") ||
+    haystack.includes("susturma")
+  ) {
+    return "MUTE";
+  }
+
+  if (
+    haystack.includes("[warn]") ||
+    haystack.includes("warn") ||
+    haystack.includes("warning") ||
+    haystack.includes("uyarı") ||
+    haystack.includes("uyari") ||
+    haystack.includes("uyg") // sende görünen UYG
+  ) {
+    return "WARN";
+  }
+
+  return "UNKNOWN";
+}
+
 function parseMee6Embed(message) {
   if (!message.embeds?.length) return null;
 
   for (const e of message.embeds) {
     const fm = fieldsToMap(e);
 
+    // Senin log formatın:
+    // Kullanıcı / Moderatör / Neden
     const userVal = fm["kullanıcı"] || fm["kullanici"] || null;
     const modVal = fm["moderatör"] || fm["moderator"] || null;
     const reasonVal = fm["neden"] || fm["sebep"] || null;
@@ -66,23 +102,21 @@ function parseMee6Embed(message) {
     const userId = extractMentionId(userVal);
     const moderatorId = extractMentionId(modVal);
 
-    // Title örn: "[WARN] arch_joker" → warn kesin
-    const title = (e.title || "").toLowerCase();
-    let actionType = "UNKNOWN";
-    if (title.includes("[warn]") || title.includes("warn") || title.includes("uyarı")) actionType = "WARN";
-    if (title.includes("[mute]") || title.includes("mute") || title.includes("timeout") || title.includes("sustur"))
-      actionType = "MUTE";
+    // Kullanıcı yakalanmıyorsa bu embed bizim işimiz olmayabilir
+    if (!userId && !moderatorId && !reasonVal) continue;
 
-    if (userId || moderatorId || reasonVal) {
-      return {
-        actionType,
-        userId,
-        moderatorId,
-        reason: reasonVal || null,
-        embedTitle: e.title || null,
-        embedDesc: e.description || null,
-      };
-    }
+    const actionType = detectActionType(e);
+
+    return {
+      actionType,
+      userId,
+      moderatorId,
+      reason: reasonVal || null,
+      embedTitle: e.title || null,
+      embedDesc: e.description || null,
+      embedAuthor: e.author?.name || null,
+      embedFooter: e.footer?.text || null,
+    };
   }
 
   return null;
@@ -113,11 +147,14 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers, // ✅ rol kontrolü için
+    GatewayIntentBits.MessageContent, // MEE6 loglarını okumak için
+    GatewayIntentBits.GuildMembers,   // rol kontrolü için
   ],
   partials: [Partials.Channel, Partials.Message],
 });
+
+process.on("unhandledRejection", (err) => console.error("[unhandledRejection]", err));
+process.on("uncaughtException", (err) => console.error("[uncaughtException]", err));
 
 client.once(Events.ClientReady, () => {
   console.log(`✅ Bot ayakta: ${client.user.tag}`);
@@ -182,7 +219,7 @@ client.on(Events.MessageCreate, async (message) => {
         : "Kayıt yok.";
 
       const embed = new EmbedBuilder()
-        .setTitle(`Sicil: ${target.tag}`)
+        .setTitle(`Sicil: ${target.username}`)
         .setDescription(desc)
         .addFields(
           { name: "Toplam WARN", value: String(warnCount), inline: true },
@@ -233,5 +270,4 @@ if (!process.env.TOKEN) {
   console.error("❌ TOKEN yok (Koyeb Environment Variables)");
   process.exit(1);
 }
-
 client.login(process.env.TOKEN);
