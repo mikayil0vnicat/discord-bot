@@ -12,9 +12,7 @@ http
     res.writeHead(200, { "Content-Type": "text/plain" });
     res.end("OK");
   })
-  .listen(PORT, () => {
-    console.log(`🌐 HTTP server listening on ${PORT}`);
-  });
+  .listen(PORT, () => console.log(`🌐 HTTP server listening on ${PORT}`));
 
 /* ===============================
    ENV
@@ -22,8 +20,7 @@ http
 const LOG_CHANNEL_ID = process.env.MEE6_LOG_CHANNEL_ID;
 
 /* ===============================
-   Yetkili Roller (Sadece bunlar !sicil ve !sicilsil kullanır)
-   Not: Yetkisizlere HİÇ cevap yok (sessiz).
+   Yetkili Roller
 ================================ */
 const SICIL_ALLOWED_ROLE_IDS = [
   "1074347907685294118",
@@ -38,7 +35,6 @@ const SICIL_ALLOWED_ROLE_IDS = [
 ================================ */
 const DATA_DIR = path.join(__dirname, "data");
 const ACTIONS_FILE = path.join(DATA_DIR, "actions.ndjson");
-const RAW_FILE = path.join(DATA_DIR, "mee6_raw.ndjson");
 
 function appendJsonLine(file, obj) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -88,28 +84,18 @@ function detectActionType(embed) {
 
   const haystack = `${authorName}\n${title}\n${desc}\n${footer}`;
 
-  // MUTE/TIMEOUT önce
   if (
     haystack.includes("mute") ||
-    haystack.includes("muted") ||
     haystack.includes("timeout") ||
-    haystack.includes("time out") ||
     haystack.includes("sustur") ||
-    haystack.includes("susturuldu") ||
-    haystack.includes("susturma")
+    haystack.includes("unmute") // logda var
   ) {
+    // UNMUTE ayrı event olsun istiyorsan burada "UNMUTE" da döndürebiliriz
+    if (haystack.includes("unmute")) return "UNMUTE";
     return "MUTE";
   }
 
-  // WARN
-  if (
-    haystack.includes("[warn]") ||
-    haystack.includes("warn") ||
-    haystack.includes("warning") ||
-    haystack.includes("uyarı") ||
-    haystack.includes("uyari") ||
-    haystack.includes("uyg") // sende görünen UYG etiketi
-  ) {
+  if (haystack.includes("warn") || haystack.includes("uyarı") || haystack.includes("uyg")) {
     return "WARN";
   }
 
@@ -129,20 +115,16 @@ function parseMee6Embed(message) {
     const userId = extractMentionId(userVal);
     const moderatorId = extractMentionId(modVal);
 
-    // Bizim formatımız bunlar yoksa büyük ihtimal başka embed
+    // Kullanıcı alanı yoksa bizim format değil
     if (!userId && !moderatorId && !reasonVal) continue;
 
-    const actionType = detectActionType(e);
-
     return {
-      actionType,
+      actionType: detectActionType(e),
       userId,
       moderatorId,
       reason: reasonVal || null,
       embedTitle: e.title || null,
       embedAuthor: e.author?.name || null,
-      embedDesc: e.description || null,
-      embedFooter: e.footer?.text || null,
     };
   }
 
@@ -174,196 +156,125 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent, // log okumak için
-    GatewayIntentBits.GuildMembers,   // rol kontrolü için
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMembers,
   ],
   partials: [Partials.Channel, Partials.Message],
 });
 
-process.on("unhandledRejection", (err) => console.error("[unhandledRejection]", err));
-process.on("uncaughtException", (err) => console.error("[uncaughtException]", err));
-
 client.once(Events.ClientReady, () => {
   console.log(`✅ Bot ayakta: ${client.user.tag}`);
   console.log(`🧩 MEE6_LOG_CHANNEL_ID: ${LOG_CHANNEL_ID || "YOK"}`);
-  console.log(`🛡️ Sicil yetkili roller: ${SICIL_ALLOWED_ROLE_IDS.length} adet`);
 });
 
 /* ===============================
-   Commands
-   - !sicil @uye
-   - !sicilsil <LOG_MESSAGE_ID> [neden...]
+   Main
 ================================ */
 client.on(Events.MessageCreate, async (message) => {
   try {
-    if (message.author?.bot) return;
-
     const content = (message.content || "").trim();
 
-    /* -------- !sicil -------- */
-    if (content.toLowerCase().startsWith("!sicil")) {
-      const ok = await isAuthorized(message);
-      if (!ok) return; // ✅ yetkisize sessiz
+    /* -------- Komutlar (SADECE İNSAN) -------- */
+    if (!message.author?.bot) {
+      // !sicil
+      if (content.toLowerCase().startsWith("!sicil")) {
+        const ok = await isAuthorized(message);
+        if (!ok) return; // yetkisize sessiz
 
-      const target = message.mentions.users.first();
-      if (!target) {
-        await message.reply("Kullanım: `!sicil @uye`");
-        return;
-      }
+        const target = message.mentions.users.first();
+        if (!target) return message.reply("Kullanım: `!sicil @uye`");
 
-      const records = safeReadNdjson(ACTIONS_FILE);
+        const records = safeReadNdjson(ACTIONS_FILE);
 
-      // İptal edilmiş log mesajı id’leri
-      const revokedIds = new Set(
-        records
-          .filter(
-            (r) =>
-              r.guildId === message.guildId &&
-              r.actionType === "REVOKE_MANUAL" &&
-              r.refMessageId
-          )
-          .map((r) => r.refMessageId)
-      );
-
-      // Kullanıcının kayıtları (iptal edilenler hariç)
-      const userRecs = records
-        .filter((r) => r.guildId === message.guildId && r.userId === target.id)
-        .filter((r) => !revokedIds.has(r.messageId))
-        .sort((a, b) => (b.ts || "").localeCompare(a.ts || ""));
-
-      const warnCount = userRecs.filter((r) => r.actionType === "WARN").length;
-      const muteCount = userRecs.filter((r) => r.actionType === "MUTE").length;
-
-      const last = userRecs.slice(0, 10);
-
-      const desc = last.length
-        ? last
-            .map((r, i) => {
-              const when = r.ts ? new Date(r.ts).toLocaleString("tr-TR") : "bilinmiyor";
-              const mod = r.moderatorId ? `<@${r.moderatorId}>` : "bilinmiyor";
-              const type = r.actionType || "UNKNOWN";
-              const reason = r.reason || "—";
-              // istersen log mesaj id'sini de gösterelim:
-              // return `**${i+1}.** ${when} • **${type}** • Mod: ${mod} • Neden: ${reason}\nID: \`${r.messageId}\``;
-              return `**${i + 1}.** ${when} • **${type}** • Mod: ${mod} • Neden: ${reason}`;
-            })
-            .join("\n")
-        : "Kayıt yok.";
-
-      const embed = new EmbedBuilder()
-        .setTitle(`Sicil: ${target.username}`)
-        .setDescription(desc)
-        .addFields(
-          { name: "Toplam WARN", value: String(warnCount), inline: true },
-          { name: "Toplam MUTE", value: String(muteCount), inline: true },
-          { name: "Toplam Kayıt", value: String(userRecs.length), inline: true }
+        const revokedIds = new Set(
+          records
+            .filter((r) => r.guildId === message.guildId && r.actionType === "REVOKE_MANUAL" && r.refMessageId)
+            .map((r) => r.refMessageId)
         );
 
-      await message.reply({ embeds: [embed] });
-      return;
+        const userRecs = records
+          .filter((r) => r.guildId === message.guildId && r.userId === target.id)
+          .filter((r) => !revokedIds.has(r.messageId))
+          .sort((a, b) => (b.ts || "").localeCompare(a.ts || ""));
+
+        const warnCount = userRecs.filter((r) => r.actionType === "WARN").length;
+        const muteCount = userRecs.filter((r) => r.actionType === "MUTE").length;
+
+        const last = userRecs.slice(0, 10);
+        const desc = last.length
+          ? last
+              .map((r, i) => {
+                const when = r.ts ? new Date(r.ts).toLocaleString("tr-TR") : "bilinmiyor";
+                const mod = r.moderatorId ? `<@${r.moderatorId}>` : "bilinmiyor";
+                return `**${i + 1}.** ${when} • **${r.actionType}** • Mod: ${mod} • Neden: ${r.reason || "—"}`;
+              })
+              .join("\n")
+          : "Kayıt yok.";
+
+        const embed = new EmbedBuilder()
+          .setTitle(`Sicil: ${target.username}`)
+          .setDescription(desc)
+          .addFields(
+            { name: "Toplam WARN", value: String(warnCount), inline: true },
+            { name: "Toplam MUTE", value: String(muteCount), inline: true },
+            { name: "Toplam Kayıt", value: String(userRecs.length), inline: true }
+          );
+
+        return message.reply({ embeds: [embed] });
+      }
+
+      // !sicilsil <id> [neden]
+      if (content.toLowerCase().startsWith("!sicilsil")) {
+        const ok = await isAuthorized(message);
+        if (!ok) return; // yetkisize sessiz
+
+        const parts = content.split(/\s+/);
+        const refMessageId = parts[1];
+        const reason = parts.slice(2).join(" ").trim() || null;
+
+        if (!refMessageId || !/^\d{15,25}$/.test(refMessageId)) {
+          return message.reply("Kullanım: `!sicilsil <LOG_MESSAGE_ID> [neden]`");
+        }
+
+        const records = safeReadNdjson(ACTIONS_FILE);
+        const exists = records.find((r) => r.guildId === message.guildId && r.messageId === refMessageId);
+        if (!exists) return message.reply("❌ Bu ID ile kayıt bulunamadı. (Log mesaj ID’sini doğru kopyala)");
+
+        const already = records.some(
+          (r) => r.guildId === message.guildId && r.actionType === "REVOKE_MANUAL" && r.refMessageId === refMessageId
+        );
+        if (already) return message.reply("⚠️ Bu kayıt zaten kaldırılmış.");
+
+        appendJsonLine(ACTIONS_FILE, {
+          ts: new Date().toISOString(),
+          guildId: message.guildId,
+          source: "MANUAL",
+          actionType: "REVOKE_MANUAL",
+          refMessageId,
+          moderatorId: message.author.id,
+          reason,
+        });
+
+        return message.reply(`✅ Kayıt kaldırıldı. (ID: \`${refMessageId}\`)`);
+      }
     }
 
-    /* -------- !sicilsil -------- */
-    if (content.toLowerCase().startsWith("!sicilsil")) {
-      const ok = await isAuthorized(message);
-      if (!ok) return; // ✅ yetkisize sessiz
-
-      const parts = content.split(/\s+/);
-      const refMessageId = parts[1];
-      const reason = parts.slice(2).join(" ").trim() || null;
-
-      if (!refMessageId || !/^\d{15,25}$/.test(refMessageId)) {
-        await message.reply("Kullanım: `!sicilsil <LOG_MESSAGE_ID> [neden]`");
-        return;
-      }
-
-      const records = safeReadNdjson(ACTIONS_FILE);
-
-      // 1) Bu messageId ile bir kayıt var mı?
-      const exists = records.find(
-        (r) => r.guildId === message.guildId && r.messageId === refMessageId
-      );
-
-      if (!exists) {
-        await message.reply("❌ Bu ID ile kayıt bulunamadı. (Log mesaj ID’sini doğru kopyala)");
-        return;
-      }
-
-      // 2) Zaten iptal edilmiş mi?
-      const alreadyRevoked = records.some(
-        (r) =>
-          r.guildId === message.guildId &&
-          r.actionType === "REVOKE_MANUAL" &&
-          r.refMessageId === refMessageId
-      );
-
-      if (alreadyRevoked) {
-        await message.reply("⚠️ Bu kayıt zaten kaldırılmış.");
-        return;
-      }
-
-      // 3) İptal kaydı ekle
-      const revokeRec = {
-        ts: new Date().toISOString(),
-        guildId: message.guildId,
-        source: "MANUAL",
-        actionType: "REVOKE_MANUAL",
-        refMessageId,
-        moderatorId: message.author.id,
-        reason,
-      };
-
-      appendJsonLine(ACTIONS_FILE, revokeRec);
-
-      await message.reply(`✅ Kayıt kaldırıldı. (ID: \`${refMessageId}\`)`);
-      return;
-    }
-
-    /* -------- Collector: MEE6 log kanalı -------- */
+    /* -------- Collector (LOG KANALI: BOT/WEBHOOK MESAJLARI DAHİL) -------- */
     if (!LOG_CHANNEL_ID) return;
     if (message.channelId !== LOG_CHANNEL_ID) return;
-
-    // Ham kayıt (debug için)
-    appendJsonLine(RAW_FILE, {
-      ts: new Date().toISOString(),
-      guildId: message.guildId,
-      channelId: message.channelId,
-      messageId: message.id,
-      authorTag: message.author?.tag ?? null,
-      isBot: Boolean(message.author?.bot),
-      isWebhook: Boolean(message.webhookId),
-      embeds: (message.embeds || []).map((e) => ({
-        title: e.title ?? null,
-        description: e.description ?? null,
-        author: e.author?.name ?? null,
-        footer: e.footer?.text ?? null,
-        fields: (e.fields || []).map((f) => ({ name: f.name, value: f.value, inline: f.inline })),
-      })),
-      content: message.content ?? "",
-    });
 
     const parsed = parseMee6Embed(message);
     if (parsed && parsed.userId) {
       const rec = {
         ts: new Date().toISOString(),
         guildId: message.guildId,
-        messageId: message.id, // ✅ log mesaj ID (manuel silme bununla çalışıyor)
+        messageId: message.id,
         source: "MEE6",
         ...parsed,
       };
 
       appendJsonLine(ACTIONS_FILE, rec);
-
-      console.log(
-        "✅ ACTION SAVED:",
-        rec.actionType,
-        "user:",
-        rec.userId,
-        "mod:",
-        rec.moderatorId || "?",
-        "reason:",
-        rec.reason || "-"
-      );
+      console.log("✅ ACTION SAVED:", rec.actionType, "user:", rec.userId, "mod:", rec.moderatorId || "?", "reason:", rec.reason || "-");
     }
   } catch (err) {
     console.error("[MessageCreate ERROR]", err);
