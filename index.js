@@ -22,20 +22,49 @@ http
 const LOG_CHANNEL_ID = process.env.MEE6_LOG_CHANNEL_ID;
 
 /* ===============================
-   Yetkili Roller (ID)
+   Yetkili Roller (Sadece bunlar !sicil ve !sicilsil kullanır)
+   Not: Yetkisizlere HİÇ cevap yok (sessiz).
 ================================ */
-const ROLE_YONETIM = "601898693448433666";
-const ROLE_MOD = "984473220801507398";
-const ROLE_EXTRA = "1074347907685294118"; // senin ekle dediğin
+const SICIL_ALLOWED_ROLE_IDS = [
+  "1074347907685294118",
+  "1101398761923674152",
+  "1074347907685294116",
+  "1074347907685294114",
+  "1434952508094152804",
+];
 
 /* ===============================
-   Utils
+   Storage (NDJSON)
 ================================ */
+const DATA_DIR = path.join(__dirname, "data");
+const ACTIONS_FILE = path.join(DATA_DIR, "actions.ndjson");
+const RAW_FILE = path.join(DATA_DIR, "mee6_raw.ndjson");
+
 function appendJsonLine(file, obj) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.appendFileSync(file, JSON.stringify(obj) + "\n", "utf8");
 }
 
+function safeReadNdjson(file) {
+  if (!fs.existsSync(file)) return [];
+  const txt = fs.readFileSync(file, "utf8").trim();
+  if (!txt) return [];
+  return txt
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => {
+      try {
+        return JSON.parse(l);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+}
+
+/* ===============================
+   Utils
+================================ */
 function extractMentionId(str) {
   if (!str) return null;
   const m = String(str).match(/<@!?(\d{15,25})>/);
@@ -57,10 +86,9 @@ function detectActionType(embed) {
   const authorName = (embed.author?.name || "").toLowerCase();
   const footer = (embed.footer?.text || "").toLowerCase();
 
-  // MEE6 bazen action'ı title'da, bazen author'da, bazen desc/footer'da verir
   const haystack = `${authorName}\n${title}\n${desc}\n${footer}`;
 
-  // MUTE/TIMEOUT önce kontrol (bazı metinlerde warn kelimesi de geçebiliyor)
+  // MUTE/TIMEOUT önce
   if (
     haystack.includes("mute") ||
     haystack.includes("muted") ||
@@ -73,13 +101,14 @@ function detectActionType(embed) {
     return "MUTE";
   }
 
+  // WARN
   if (
     haystack.includes("[warn]") ||
     haystack.includes("warn") ||
     haystack.includes("warning") ||
     haystack.includes("uyarı") ||
     haystack.includes("uyari") ||
-    haystack.includes("uyg") // sende görünen UYG
+    haystack.includes("uyg") // sende görünen UYG etiketi
   ) {
     return "WARN";
   }
@@ -93,8 +122,6 @@ function parseMee6Embed(message) {
   for (const e of message.embeds) {
     const fm = fieldsToMap(e);
 
-    // Senin log formatın:
-    // Kullanıcı / Moderatör / Neden
     const userVal = fm["kullanıcı"] || fm["kullanici"] || null;
     const modVal = fm["moderatör"] || fm["moderator"] || null;
     const reasonVal = fm["neden"] || fm["sebep"] || null;
@@ -102,7 +129,7 @@ function parseMee6Embed(message) {
     const userId = extractMentionId(userVal);
     const moderatorId = extractMentionId(modVal);
 
-    // Kullanıcı yakalanmıyorsa bu embed bizim işimiz olmayabilir
+    // Bizim formatımız bunlar yoksa büyük ihtimal başka embed
     if (!userId && !moderatorId && !reasonVal) continue;
 
     const actionType = detectActionType(e);
@@ -113,8 +140,8 @@ function parseMee6Embed(message) {
       moderatorId,
       reason: reasonVal || null,
       embedTitle: e.title || null,
-      embedDesc: e.description || null,
       embedAuthor: e.author?.name || null,
+      embedDesc: e.description || null,
       embedFooter: e.footer?.text || null,
     };
   }
@@ -137,7 +164,7 @@ async function isAuthorized(message) {
   const roles = member.roles?.cache;
   if (!roles) return false;
 
-  return roles.has(ROLE_YONETIM) || roles.has(ROLE_MOD) || roles.has(ROLE_EXTRA);
+  return SICIL_ALLOWED_ROLE_IDS.some((id) => roles.has(id));
 }
 
 /* ===============================
@@ -147,7 +174,7 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent, // MEE6 loglarını okumak için
+    GatewayIntentBits.MessageContent, // log okumak için
     GatewayIntentBits.GuildMembers,   // rol kontrolü için
   ],
   partials: [Partials.Channel, Partials.Message],
@@ -159,20 +186,24 @@ process.on("uncaughtException", (err) => console.error("[uncaughtException]", er
 client.once(Events.ClientReady, () => {
   console.log(`✅ Bot ayakta: ${client.user.tag}`);
   console.log(`🧩 MEE6_LOG_CHANNEL_ID: ${LOG_CHANNEL_ID || "YOK"}`);
+  console.log(`🛡️ Sicil yetkili roller: ${SICIL_ALLOWED_ROLE_IDS.length} adet`);
 });
 
 /* ===============================
-   Main
+   Commands
+   - !sicil @uye
+   - !sicilsil <LOG_MESSAGE_ID> [neden...]
 ================================ */
 client.on(Events.MessageCreate, async (message) => {
   try {
-    /* -------- !sicil komutu -------- */
-    if (!message.author?.bot && message.content?.toLowerCase().startsWith("!sicil")) {
+    if (message.author?.bot) return;
+
+    const content = (message.content || "").trim();
+
+    /* -------- !sicil -------- */
+    if (content.toLowerCase().startsWith("!sicil")) {
       const ok = await isAuthorized(message);
-      if (!ok) {
-        await message.reply("❌ Bu komutu kullanmak için yetkin yok.");
-        return;
-      }
+      if (!ok) return; // ✅ yetkisize sessiz
 
       const target = message.mentions.users.first();
       if (!target) {
@@ -180,25 +211,24 @@ client.on(Events.MessageCreate, async (message) => {
         return;
       }
 
-      const file = path.join(__dirname, "data", "actions.ndjson");
-      if (!fs.existsSync(file)) {
-        await message.reply("Henüz kayıt yok.");
-        return;
-      }
+      const records = safeReadNdjson(ACTIONS_FILE);
 
-      const lines = fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean);
-      const records = lines
-        .map((l) => {
-          try {
-            return JSON.parse(l);
-          } catch {
-            return null;
-          }
-        })
-        .filter(Boolean);
+      // İptal edilmiş log mesajı id’leri
+      const revokedIds = new Set(
+        records
+          .filter(
+            (r) =>
+              r.guildId === message.guildId &&
+              r.actionType === "REVOKE_MANUAL" &&
+              r.refMessageId
+          )
+          .map((r) => r.refMessageId)
+      );
 
+      // Kullanıcının kayıtları (iptal edilenler hariç)
       const userRecs = records
         .filter((r) => r.guildId === message.guildId && r.userId === target.id)
+        .filter((r) => !revokedIds.has(r.messageId))
         .sort((a, b) => (b.ts || "").localeCompare(a.ts || ""));
 
       const warnCount = userRecs.filter((r) => r.actionType === "WARN").length;
@@ -213,6 +243,8 @@ client.on(Events.MessageCreate, async (message) => {
               const mod = r.moderatorId ? `<@${r.moderatorId}>` : "bilinmiyor";
               const type = r.actionType || "UNKNOWN";
               const reason = r.reason || "—";
+              // istersen log mesaj id'sini de gösterelim:
+              // return `**${i+1}.** ${when} • **${type}** • Mod: ${mod} • Neden: ${reason}\nID: \`${r.messageId}\``;
               return `**${i + 1}.** ${when} • **${type}** • Mod: ${mod} • Neden: ${reason}`;
             })
             .join("\n")
@@ -231,21 +263,96 @@ client.on(Events.MessageCreate, async (message) => {
       return;
     }
 
+    /* -------- !sicilsil -------- */
+    if (content.toLowerCase().startsWith("!sicilsil")) {
+      const ok = await isAuthorized(message);
+      if (!ok) return; // ✅ yetkisize sessiz
+
+      const parts = content.split(/\s+/);
+      const refMessageId = parts[1];
+      const reason = parts.slice(2).join(" ").trim() || null;
+
+      if (!refMessageId || !/^\d{15,25}$/.test(refMessageId)) {
+        await message.reply("Kullanım: `!sicilsil <LOG_MESSAGE_ID> [neden]`");
+        return;
+      }
+
+      const records = safeReadNdjson(ACTIONS_FILE);
+
+      // 1) Bu messageId ile bir kayıt var mı?
+      const exists = records.find(
+        (r) => r.guildId === message.guildId && r.messageId === refMessageId
+      );
+
+      if (!exists) {
+        await message.reply("❌ Bu ID ile kayıt bulunamadı. (Log mesaj ID’sini doğru kopyala)");
+        return;
+      }
+
+      // 2) Zaten iptal edilmiş mi?
+      const alreadyRevoked = records.some(
+        (r) =>
+          r.guildId === message.guildId &&
+          r.actionType === "REVOKE_MANUAL" &&
+          r.refMessageId === refMessageId
+      );
+
+      if (alreadyRevoked) {
+        await message.reply("⚠️ Bu kayıt zaten kaldırılmış.");
+        return;
+      }
+
+      // 3) İptal kaydı ekle
+      const revokeRec = {
+        ts: new Date().toISOString(),
+        guildId: message.guildId,
+        source: "MANUAL",
+        actionType: "REVOKE_MANUAL",
+        refMessageId,
+        moderatorId: message.author.id,
+        reason,
+      };
+
+      appendJsonLine(ACTIONS_FILE, revokeRec);
+
+      await message.reply(`✅ Kayıt kaldırıldı. (ID: \`${refMessageId}\`)`);
+      return;
+    }
+
     /* -------- Collector: MEE6 log kanalı -------- */
     if (!LOG_CHANNEL_ID) return;
     if (message.channelId !== LOG_CHANNEL_ID) return;
+
+    // Ham kayıt (debug için)
+    appendJsonLine(RAW_FILE, {
+      ts: new Date().toISOString(),
+      guildId: message.guildId,
+      channelId: message.channelId,
+      messageId: message.id,
+      authorTag: message.author?.tag ?? null,
+      isBot: Boolean(message.author?.bot),
+      isWebhook: Boolean(message.webhookId),
+      embeds: (message.embeds || []).map((e) => ({
+        title: e.title ?? null,
+        description: e.description ?? null,
+        author: e.author?.name ?? null,
+        footer: e.footer?.text ?? null,
+        fields: (e.fields || []).map((f) => ({ name: f.name, value: f.value, inline: f.inline })),
+      })),
+      content: message.content ?? "",
+    });
 
     const parsed = parseMee6Embed(message);
     if (parsed && parsed.userId) {
       const rec = {
         ts: new Date().toISOString(),
         guildId: message.guildId,
-        messageId: message.id,
+        messageId: message.id, // ✅ log mesaj ID (manuel silme bununla çalışıyor)
         source: "MEE6",
         ...parsed,
       };
 
-      appendJsonLine(path.join(__dirname, "data", "actions.ndjson"), rec);
+      appendJsonLine(ACTIONS_FILE, rec);
 
       console.log(
         "✅ ACTION SAVED:",
