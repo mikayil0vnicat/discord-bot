@@ -1,14 +1,17 @@
 FROM node:20-alpine
 
-# Çalışma klasörü
 WORKDIR /app
 
-# Paketleri kopyala ve kur
+# Önce package dosyaları
 COPY package*.json ./
-RUN npm install
 
-# Kalan dosyaları kopyala
+# Prod deps kur (pg dahil)
+RUN npm ci --omit=dev || npm install --omit=dev
+
+# Sonra kod
 COPY . .
 
-# Botu başlat
-CMD ["node", "index.js"]
+ENV NODE_ENV=production
+EXPOSE 3000
+
+CMD ["npm", "start"]
