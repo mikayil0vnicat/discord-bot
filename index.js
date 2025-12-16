@@ -21,6 +21,8 @@ const LOG_CHANNEL_ID = process.env.MEE6_LOG_CHANNEL_ID;
 
 /* ===============================
    Yetkili Roller
+   Sadece bu roller: !sicil / !sicilsil
+   Yetkisize HİÇ cevap yok (sessiz).
 ================================ */
 const SICIL_ALLOWED_ROLE_IDS = [
   "1074347907685294118",
@@ -35,6 +37,7 @@ const SICIL_ALLOWED_ROLE_IDS = [
 ================================ */
 const DATA_DIR = path.join(__dirname, "data");
 const ACTIONS_FILE = path.join(DATA_DIR, "actions.ndjson");
+const RAW_FILE = path.join(DATA_DIR, "mee6_raw.ndjson");
 
 function appendJsonLine(file, obj) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -81,21 +84,33 @@ function detectActionType(embed) {
   const desc = (embed.description || "").toLowerCase();
   const authorName = (embed.author?.name || "").toLowerCase();
   const footer = (embed.footer?.text || "").toLowerCase();
-
   const haystack = `${authorName}\n${title}\n${desc}\n${footer}`;
 
+  // UNMUTE (istersen sicilde ayrı gösteririz)
+  if (haystack.includes("unmute")) return "UNMUTE";
+
+  // MUTE / TIMEOUT
   if (
     haystack.includes("mute") ||
+    haystack.includes("muted") ||
     haystack.includes("timeout") ||
+    haystack.includes("time out") ||
     haystack.includes("sustur") ||
-    haystack.includes("unmute") // logda var
+    haystack.includes("susturuldu") ||
+    haystack.includes("susturma")
   ) {
-    // UNMUTE ayrı event olsun istiyorsan burada "UNMUTE" da döndürebiliriz
-    if (haystack.includes("unmute")) return "UNMUTE";
     return "MUTE";
   }
 
-  if (haystack.includes("warn") || haystack.includes("uyarı") || haystack.includes("uyg")) {
+  // WARN
+  if (
+    haystack.includes("[warn]") ||
+    haystack.includes("warn") ||
+    haystack.includes("warning") ||
+    haystack.includes("uyarı") ||
+    haystack.includes("uyari") ||
+    haystack.includes("uyg")
+  ) {
     return "WARN";
   }
 
@@ -108,23 +123,29 @@ function parseMee6Embed(message) {
   for (const e of message.embeds) {
     const fm = fieldsToMap(e);
 
+    // Senin MEE6 log formatın:
+    // Kullanıcı / Moderatör / Neden (+ bazen Süre)
     const userVal = fm["kullanıcı"] || fm["kullanici"] || null;
     const modVal = fm["moderatör"] || fm["moderator"] || null;
     const reasonVal = fm["neden"] || fm["sebep"] || null;
+    const durationVal = fm["süre"] || fm["sure"] || null;
 
     const userId = extractMentionId(userVal);
     const moderatorId = extractMentionId(modVal);
 
-    // Kullanıcı alanı yoksa bizim format değil
-    if (!userId && !moderatorId && !reasonVal) continue;
+    // Bu embed bizim format değilse geç
+    if (!userId && !moderatorId && !reasonVal && !durationVal) continue;
 
     return {
       actionType: detectActionType(e),
       userId,
       moderatorId,
       reason: reasonVal || null,
+      duration: durationVal || null,
       embedTitle: e.title || null,
       embedAuthor: e.author?.name || null,
+      embedDesc: e.description || null,
+      embedFooter: e.footer?.text || null,
     };
   }
 
@@ -156,15 +177,19 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.MessageContent, // log okumak için
+    GatewayIntentBits.GuildMembers,   // rol kontrolü için
   ],
   partials: [Partials.Channel, Partials.Message],
 });
 
+process.on("unhandledRejection", (err) => console.error("[unhandledRejection]", err));
+process.on("uncaughtException", (err) => console.error("[uncaughtException]", err));
+
 client.once(Events.ClientReady, () => {
   console.log(`✅ Bot ayakta: ${client.user.tag}`);
   console.log(`🧩 MEE6_LOG_CHANNEL_ID: ${LOG_CHANNEL_ID || "YOK"}`);
+  console.log(`🛡️ Sicil yetkili roller: ${SICIL_ALLOWED_ROLE_IDS.length} adet`);
 });
 
 /* ===============================
@@ -174,24 +199,29 @@ client.on(Events.MessageCreate, async (message) => {
   try {
     const content = (message.content || "").trim();
 
-    /* -------- Komutlar (SADECE İNSAN) -------- */
+    /* -------- Komutlar: SADECE İNSAN -------- */
     if (!message.author?.bot) {
-      // !sicil
+      // !sicil @uye
       if (content.toLowerCase().startsWith("!sicil")) {
         const ok = await isAuthorized(message);
-        if (!ok) return; // yetkisize sessiz
+        if (!ok) return; // ✅ yetkisize sessiz
 
         const target = message.mentions.users.first();
-        if (!target) return message.reply("Kullanım: `!sicil @uye`");
+        if (!target) {
+          await message.reply("Kullanım: `!sicil @uye`");
+          return;
+        }
 
         const records = safeReadNdjson(ACTIONS_FILE);
 
+        // manuel iptaller
         const revokedIds = new Set(
           records
             .filter((r) => r.guildId === message.guildId && r.actionType === "REVOKE_MANUAL" && r.refMessageId)
             .map((r) => r.refMessageId)
         );
 
+        // kullanıcı kayıtları (iptaller hariç)
         const userRecs = records
           .filter((r) => r.guildId === message.guildId && r.userId === target.id)
           .filter((r) => !revokedIds.has(r.messageId))
@@ -201,12 +231,16 @@ client.on(Events.MessageCreate, async (message) => {
         const muteCount = userRecs.filter((r) => r.actionType === "MUTE").length;
 
         const last = userRecs.slice(0, 10);
+
         const desc = last.length
           ? last
               .map((r, i) => {
                 const when = r.ts ? new Date(r.ts).toLocaleString("tr-TR") : "bilinmiyor";
                 const mod = r.moderatorId ? `<@${r.moderatorId}>` : "bilinmiyor";
-                return `**${i + 1}.** ${when} • **${r.actionType}** • Mod: ${mod} • Neden: ${r.reason || "—"}`;
+                const reason = r.reason || "—";
+                const dur = r.duration ? ` • Süre: ${r.duration}` : "";
+                const type = r.actionType || "UNKNOWN";
+                return `**${i + 1}.** ${when} • **${type}** • Mod: ${mod} • Neden: ${reason}${dur}\n🆔 \`${r.messageId}\``;
               })
               .join("\n")
           : "Kayıt yok.";
@@ -220,31 +254,43 @@ client.on(Events.MessageCreate, async (message) => {
             { name: "Toplam Kayıt", value: String(userRecs.length), inline: true }
           );
 
-        return message.reply({ embeds: [embed] });
+        await message.reply({ embeds: [embed] });
+        return;
       }
 
-      // !sicilsil <id> [neden]
+      // !sicilsil <LOG_MESSAGE_ID> [neden]
       if (content.toLowerCase().startsWith("!sicilsil")) {
         const ok = await isAuthorized(message);
-        if (!ok) return; // yetkisize sessiz
+        if (!ok) return; // ✅ yetkisize sessiz
 
         const parts = content.split(/\s+/);
         const refMessageId = parts[1];
         const reason = parts.slice(2).join(" ").trim() || null;
 
         if (!refMessageId || !/^\d{15,25}$/.test(refMessageId)) {
-          return message.reply("Kullanım: `!sicilsil <LOG_MESSAGE_ID> [neden]`");
+          await message.reply("Kullanım: `!sicilsil <LOG_MESSAGE_ID> [neden]`");
+          return;
         }
 
         const records = safeReadNdjson(ACTIONS_FILE);
-        const exists = records.find((r) => r.guildId === message.guildId && r.messageId === refMessageId);
-        if (!exists) return message.reply("❌ Bu ID ile kayıt bulunamadı. (Log mesaj ID’sini doğru kopyala)");
 
+        // bu ID ile kayıt var mı?
+        const exists = records.find((r) => r.guildId === message.guildId && r.messageId === refMessageId);
+        if (!exists) {
+          await message.reply("❌ Bu ID ile kayıt bulunamadı. (Sicilde görünen 🆔 ID’yi kopyala)");
+          return;
+        }
+
+        // zaten iptal edilmiş mi?
         const already = records.some(
           (r) => r.guildId === message.guildId && r.actionType === "REVOKE_MANUAL" && r.refMessageId === refMessageId
         );
-        if (already) return message.reply("⚠️ Bu kayıt zaten kaldırılmış.");
+        if (already) {
+          await message.reply("⚠️ Bu kayıt zaten kaldırılmış.");
+          return;
+        }
 
+        // iptal kaydı ekle
         appendJsonLine(ACTIONS_FILE, {
           ts: new Date().toISOString(),
           guildId: message.guildId,
@@ -255,26 +301,56 @@ client.on(Events.MessageCreate, async (message) => {
           reason,
         });
 
-        return message.reply(`✅ Kayıt kaldırıldı. (ID: \`${refMessageId}\`)`);
+        await message.reply(`✅ Kayıt kaldırıldı. (ID: \`${refMessageId}\`)`);
+        return;
       }
     }
 
-    /* -------- Collector (LOG KANALI: BOT/WEBHOOK MESAJLARI DAHİL) -------- */
+    /* -------- Collector: LOG KANALI (BOT/WEBHOOK dahil) -------- */
     if (!LOG_CHANNEL_ID) return;
     if (message.channelId !== LOG_CHANNEL_ID) return;
+
+    // Ham kaydı tut (debug)
+    appendJsonLine(RAW_FILE, {
+      ts: new Date().toISOString(),
+      guildId: message.guildId,
+      channelId: message.channelId,
+      messageId: message.id,
+      authorTag: message.author?.tag ?? null,
+      isBot: Boolean(message.author?.bot),
+      isWebhook: Boolean(message.webhookId),
+      embeds: (message.embeds || []).map((e) => ({
+        title: e.title ?? null,
+        description: e.description ?? null,
+        author: e.author?.name ?? null,
+        footer: e.footer?.text ?? null,
+        fields: (e.fields || []).map((f) => ({ name: f.name, value: f.value, inline: f.inline })),
+      })),
+      content: message.content ?? "",
+    });
 
     const parsed = parseMee6Embed(message);
     if (parsed && parsed.userId) {
       const rec = {
         ts: new Date().toISOString(),
         guildId: message.guildId,
-        messageId: message.id,
+        messageId: message.id, // ✅ sicilsil bununla çalışır
         source: "MEE6",
         ...parsed,
       };
 
       appendJsonLine(ACTIONS_FILE, rec);
-      console.log("✅ ACTION SAVED:", rec.actionType, "user:", rec.userId, "mod:", rec.moderatorId || "?", "reason:", rec.reason || "-");
+
+      console.log(
+        "✅ ACTION SAVED:",
+        rec.actionType,
+        "user:",
+        rec.userId,
+        "mod:",
+        rec.moderatorId || "?",
+        "reason:",
+        rec.reason || "-"
+      );
     }
   } catch (err) {
     console.error("[MessageCreate ERROR]", err);
