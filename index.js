@@ -1,4 +1,4 @@
-require("dotenv").config();
+
 const http = require("http");
 
 const PORT = process.env.PORT || 3000;
@@ -39,4 +39,5 @@ if (!process.env.TOKEN) {
 }
 
 client.login(process.env.TOKEN);
+
 
