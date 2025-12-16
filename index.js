@@ -7,22 +7,31 @@ const { Client, GatewayIntentBits, Partials, Events, EmbedBuilder } = require("d
    Koyeb Healthcheck (HTTP)
 ================================ */
 const PORT = process.env.PORT || 3000;
-http.createServer((req, res) => {
-  res.writeHead(200, { "Content-Type": "text/plain" });
-  res.end("OK");
-}).listen(PORT, () => {
-  console.log(`🌐 HTTP server listening on ${PORT}`);
-});
+
+http
+  .createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("OK");
+  })
+  .listen(PORT, () => {
+    console.log(`🌐 HTTP server listening on ${PORT}`);
+  });
 
 /* ===============================
    ENV
 ================================ */
 const LOG_CHANNEL_ID = process.env.MEE6_LOG_CHANNEL_ID;
 
-// Yetkili roller (sen daha önce vermiştin)
+/* ===============================
+   Yetkili Roller
+================================ */
 const ROLE_YONETIM = "601898693448433666";
 const ROLE_MOD = "984473220801507398";
+const ROLE_EXTRA = "1074347907685294118"; // ✅ yeni eklenen rol
 
+/* ===============================
+   Utils
+================================ */
 function appendJsonLine(file, obj) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.appendFileSync(file, JSON.stringify(obj) + "\n", "utf8");
@@ -47,27 +56,23 @@ function fieldsToMap(embed) {
 function parseMee6Embed(message) {
   if (!message.embeds?.length) return null;
 
-  // MEE6 bazen birden çok embed atabilir; ilk anlamlıyı bulalım
   for (const e of message.embeds) {
     const fm = fieldsToMap(e);
 
-    // Senin örnekte isimler Türkçe:
-    // "kullanıcı", "moderatör", "neden"
     const userVal = fm["kullanıcı"] || fm["kullanici"] || null;
-    const modVal = fm["moderatör"] || fm["moderator"] || fm["moderatör:"] || null;
+    const modVal = fm["moderatör"] || fm["moderator"] || null;
     const reasonVal = fm["neden"] || fm["sebep"] || null;
 
     const userId = extractMentionId(userVal);
     const moderatorId = extractMentionId(modVal);
 
-    // actionType yakalama (mute örneğini görünce kesinleştiririz)
+    // Title örn: "[WARN] arch_joker" → warn kesin
     const title = (e.title || "").toLowerCase();
-    const desc = (e.description || "").toLowerCase();
     let actionType = "UNKNOWN";
-    if (title.includes("warn") || title.includes("uyarı") || desc.includes("warn") || desc.includes("uyarı")) actionType = "WARN";
-    if (title.includes("mute") || title.includes("sustur") || title.includes("timeout") || desc.includes("mute") || desc.includes("sustur") || desc.includes("timeout")) actionType = "MUTE";
+    if (title.includes("[warn]") || title.includes("warn") || title.includes("uyarı")) actionType = "WARN";
+    if (title.includes("[mute]") || title.includes("mute") || title.includes("timeout") || title.includes("sustur"))
+      actionType = "MUTE";
 
-    // En azından kullanıcı veya moderatör yakalanıyorsa bu kaydı alalım
     if (userId || moderatorId || reasonVal) {
       return {
         actionType,
@@ -83,9 +88,22 @@ function parseMee6Embed(message) {
   return null;
 }
 
-function isAuthorized(member) {
-  if (!member) return false;
-  return member.roles?.cache?.has(ROLE_YONETIM) || member.roles?.cache?.has(ROLE_MOD);
+async function isAuthorized(message) {
+  if (!message.guild) return false;
+
+  let member = message.member;
+  if (!member) {
+    try {
+      member = await message.guild.members.fetch(message.author.id);
+    } catch {
+      return false;
+    }
+  }
+
+  const roles = member.roles?.cache;
+  if (!roles) return false;
+
+  return roles.has(ROLE_YONETIM) || roles.has(ROLE_MOD) || roles.has(ROLE_EXTRA);
 }
 
 /* ===============================
@@ -96,6 +114,7 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMembers, // ✅ rol kontrolü için
   ],
   partials: [Partials.Channel, Partials.Message],
 });
@@ -106,15 +125,17 @@ client.once(Events.ClientReady, () => {
 });
 
 /* ===============================
-   1) Collect: MEE6 log kanalını oku
-   2) Parse: Kullanıcı/Moderatör/Neden
-   3) Store: NDJSON'a yaz (sonra DB'ye geçeceğiz)
+   Main
 ================================ */
 client.on(Events.MessageCreate, async (message) => {
   try {
-    // --- Komutlar (sicil) ---
-    if (!message.author?.bot && message.content?.startsWith("!sicil")) {
-      if (!isAuthorized(message.member)) return;
+    /* -------- !sicil komutu -------- */
+    if (!message.author?.bot && message.content?.toLowerCase().startsWith("!sicil")) {
+      const ok = await isAuthorized(message);
+      if (!ok) {
+        await message.reply("❌ Bu komutu kullanmak için yetkin yok.");
+        return;
+      }
 
       const target = message.mentions.users.first();
       if (!target) {
@@ -129,27 +150,35 @@ client.on(Events.MessageCreate, async (message) => {
       }
 
       const lines = fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean);
-      const records = lines.map((l) => {
-        try { return JSON.parse(l); } catch { return null; }
-      }).filter(Boolean);
+      const records = lines
+        .map((l) => {
+          try {
+            return JSON.parse(l);
+          } catch {
+            return null;
+          }
+        })
+        .filter(Boolean);
 
       const userRecs = records
-        .filter(r => r.guildId === message.guildId && r.userId === target.id)
+        .filter((r) => r.guildId === message.guildId && r.userId === target.id)
         .sort((a, b) => (b.ts || "").localeCompare(a.ts || ""));
 
-      const warnCount = userRecs.filter(r => r.actionType === "WARN").length;
-      const muteCount = userRecs.filter(r => r.actionType === "MUTE").length;
+      const warnCount = userRecs.filter((r) => r.actionType === "WARN").length;
+      const muteCount = userRecs.filter((r) => r.actionType === "MUTE").length;
 
       const last = userRecs.slice(0, 10);
 
       const desc = last.length
-        ? last.map((r, i) => {
-            const when = r.ts ? new Date(r.ts).toLocaleString("tr-TR") : "bilinmiyor";
-            const mod = r.moderatorId ? `<@${r.moderatorId}>` : "bilinmiyor";
-            const type = r.actionType || "UNKNOWN";
-            const reason = r.reason || "—";
-            return `**${i + 1}.** ${when} • **${type}** • Mod: ${mod} • Neden: ${reason}`;
-          }).join("\n")
+        ? last
+            .map((r, i) => {
+              const when = r.ts ? new Date(r.ts).toLocaleString("tr-TR") : "bilinmiyor";
+              const mod = r.moderatorId ? `<@${r.moderatorId}>` : "bilinmiyor";
+              const type = r.actionType || "UNKNOWN";
+              const reason = r.reason || "—";
+              return `**${i + 1}.** ${when} • **${type}** • Mod: ${mod} • Neden: ${reason}`;
+            })
+            .join("\n")
         : "Kayıt yok.";
 
       const embed = new EmbedBuilder()
@@ -158,35 +187,17 @@ client.on(Events.MessageCreate, async (message) => {
         .addFields(
           { name: "Toplam WARN", value: String(warnCount), inline: true },
           { name: "Toplam MUTE", value: String(muteCount), inline: true },
-          { name: "Toplam Kayıt", value: String(userRecs.length), inline: true },
+          { name: "Toplam Kayıt", value: String(userRecs.length), inline: true }
         );
 
       await message.reply({ embeds: [embed] });
       return;
     }
 
-    // --- Collector sadece log kanalında çalışsın ---
+    /* -------- Collector: MEE6 log kanalı -------- */
     if (!LOG_CHANNEL_ID) return;
     if (message.channelId !== LOG_CHANNEL_ID) return;
 
-    // Ham kayıt (debug için)
-    appendJsonLine(path.join(__dirname, "data", "mee6_raw.ndjson"), {
-      ts: new Date().toISOString(),
-      guildId: message.guildId,
-      channelId: message.channelId,
-      messageId: message.id,
-      authorTag: message.author?.tag ?? null,
-      isBot: Boolean(message.author?.bot),
-      isWebhook: Boolean(message.webhookId),
-      embeds: (message.embeds || []).map(e => ({
-        title: e.title ?? null,
-        description: e.description ?? null,
-        fields: (e.fields || []).map(f => ({ name: f.name, value: f.value, inline: f.inline })),
-      })),
-      content: message.content ?? "",
-    });
-
-    // Parse + actions kaydı
     const parsed = parseMee6Embed(message);
     if (parsed && parsed.userId) {
       const rec = {
@@ -199,7 +210,16 @@ client.on(Events.MessageCreate, async (message) => {
 
       appendJsonLine(path.join(__dirname, "data", "actions.ndjson"), rec);
 
-      console.log("✅ ACTION SAVED:", rec.actionType, "user:", rec.userId, "mod:", rec.moderatorId || "?", "reason:", rec.reason || "-");
+      console.log(
+        "✅ ACTION SAVED:",
+        rec.actionType,
+        "user:",
+        rec.userId,
+        "mod:",
+        rec.moderatorId || "?",
+        "reason:",
+        rec.reason || "-"
+      );
     }
   } catch (err) {
     console.error("[MessageCreate ERROR]", err);
@@ -213,4 +233,5 @@ if (!process.env.TOKEN) {
   console.error("❌ TOKEN yok (Koyeb Environment Variables)");
   process.exit(1);
 }
+
 client.login(process.env.TOKEN);
