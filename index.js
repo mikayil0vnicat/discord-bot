@@ -1,27 +1,23 @@
-console.log("✅ BOOT: index.js çalıştı:", new Date().toISOString());
+console.log("✅ BOOT:", new Date().toISOString());
 
 const { Client, GatewayIntentBits, Partials, EmbedBuilder } = require("discord.js");
 const http = require("http");
 
-// ==== Render healthcheck için HTTP ====
+// Healthcheck (Koyeb/Web service)
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain" });
   res.end("OK");
 }).listen(PORT, () => console.log("🌐 Web ping OK on port", PORT));
 
-// ==== ENV ====
+// ENV
 const TOKEN = process.env.DISCORD_TOKEN;
 const DATABASE_URL = process.env.DATABASE_URL;
 
-if (!TOKEN) {
-  console.error("❌ DISCORD_TOKEN yok! Render > Environment'a ekle.");
-  // Token yoksa bot zaten bağlanamaz, ama web ping yine çalışır.
-}
+// 🔥 Kanal ID artık ENV’den
+const LOG_CHANNEL_ID = process.env.MEE6_LOG_CHANNEL_ID;
 
-// ==== Sabitler ====
 const MEE6_ID = "159985870458322944";
-const LOG_CHANNEL_ID = "1449073111495610400";
 
 const ALLOWED_ROLES = [
   "1074347907685294118", // boyka
@@ -31,34 +27,27 @@ const ALLOWED_ROLES = [
   "1074347907685294114", // moderator
 ];
 
-// ==== Discord Client ====
+if (!TOKEN) console.error("❌ DISCORD_TOKEN yok!");
+if (!DATABASE_URL) console.warn("⚠️ DATABASE_URL yok (DB'siz çalışır)");
+if (!LOG_CHANNEL_ID) console.error("❌ MEE6_LOG_CHANNEL_ID yok! (Mee6 yakalanamaz)");
+
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
   partials: [Partials.Channel, Partials.Message],
 });
 
-// ==== DB (opsiyonel) ====
+// DB opsiyonel
 let pool = null;
 let dbReady = false;
 
-async function initDbIfPossible() {
-  if (!DATABASE_URL) {
-    console.warn("⚠️ DATABASE_URL yok. Bot çalışacak ama DB kaydı yapmayacak.");
-    return;
-  }
-
+async function initDb() {
+  if (!DATABASE_URL) return;
   try {
     const { Pool } = require("pg");
-    pool = new Pool({
-      connectionString: DATABASE_URL,
-      ssl: { rejectUnauthorized: false },
-    });
-
-    // Bağlantı test
+    pool = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } });
     await pool.query("SELECT 1");
     console.log("✅ DB bağlantı testi OK");
 
-    // Tablo
     await pool.query(`
       CREATE TABLE IF NOT EXISTS actions (
         id BIGSERIAL PRIMARY KEY,
@@ -75,7 +64,6 @@ async function initDbIfPossible() {
     dbReady = true;
     console.log("✅ DB tablo hazır");
   } catch (e) {
-    dbReady = false;
     console.error("❌ DB init hatası (bot kapanmaz):", e?.message || e);
   }
 }
@@ -87,12 +75,10 @@ function hasPermission(member) {
 function pickField(embed, name) {
   return embed.fields?.find(f => f.name?.toLowerCase() === name.toLowerCase())?.value ?? "";
 }
-
 function extractId(text) {
   const m = String(text || "").match(/<@!?(\d+)>/);
   return m ? m[1] : null;
 }
-
 function parseMee6Embed(message) {
   const e = message.embeds?.[0];
   if (!e) return null;
@@ -102,7 +88,6 @@ function parseMee6Embed(message) {
     title.includes("[warn]") ? "warn" :
     (title.includes("mute") || title.includes("timeout")) ? "mute" :
     null;
-
   if (!type) return null;
 
   const user_id = extractId(pickField(e, "Kullanıcı"));
@@ -115,19 +100,39 @@ function parseMee6Embed(message) {
 
 client.on("ready", async () => {
   console.log(`✅ Discord bağlandı: ${client.user.tag}`);
-  await initDbIfPossible();
+  console.log("ℹ️ Mee6 log kanal ID (ENV):", LOG_CHANNEL_ID);
+  await initDb();
 });
 
 client.on("messageCreate", async (message) => {
   try {
     if (!message.guildId) return;
 
-    // ---- MEE6 LOG ----
-    if (message.channelId === LOG_CHANNEL_ID && message.author?.id === MEE6_ID) {
-      const parsed = parseMee6Embed(message);
-      if (!parsed) return;
+    // ✅ DEBUG: Log kanalına gelen HER mesajı logla (Mee6 yakalama sorunu için)
+    if (LOG_CHANNEL_ID && message.channelId === LOG_CHANNEL_ID) {
+      console.log("🧪 LOG-CHANNEL MESSAGE:", {
+        channelId: message.channelId,
+        authorId: message.author?.id,
+        authorName: message.author?.username,
+        isWebhook: Boolean(message.webhookId),
+        contentLen: message.content?.length || 0,
+        embedCount: message.embeds?.length || 0,
+        embedTitle: message.embeds?.[0]?.title || null,
+      });
+    }
 
-      console.log("📩 MEE6 yakalandı:", parsed);
+    // ---- Mee6 kayıt ----
+    // Not: bazen webhook gibi düşebilir; bu yüzden authorId OR username kontrolü
+    const isMee6 =
+      message.author?.id === MEE6_ID ||
+      (message.author?.username || "").toLowerCase().includes("mee6");
+
+    if (LOG_CHANNEL_ID && message.channelId === LOG_CHANNEL_ID && isMee6) {
+      const parsed = parseMee6Embed(message);
+
+      console.log("📩 MEE6 görüldü. parsed=", parsed);
+
+      if (!parsed) return;
 
       if (!dbReady) {
         console.warn("⚠️ DB hazır değil, kayıt atlandı.");
@@ -144,9 +149,8 @@ client.on("messageCreate", async (message) => {
         );
         console.log("✅ DB kayıt OK");
       } catch (e) {
-        console.error("❌ DB insert hatası (bot kapanmaz):", e?.message || e);
+        console.error("❌ DB insert hatası:", e?.message || e);
       }
-
       return;
     }
 
@@ -158,12 +162,9 @@ client.on("messageCreate", async (message) => {
         return message.reply("❌ Bu komutu kullanma yetkin yok.");
 
       const target = message.mentions.users.first();
-      if (!target)
-        return message.reply("Kullanım: **!sicil @üye**");
+      if (!target) return message.reply("Kullanım: **!sicil @üye**");
 
-      if (!dbReady) {
-        return message.reply("⚠️ DB bağlı değil / hazır değil. (DATABASE_URL veya DB bağlantısı kontrol)");
-      }
+      if (!dbReady) return message.reply("⚠️ DB hazır değil.");
 
       const { rows } = await pool.query(
         `SELECT action_type, moderator_id, reason, action_at
@@ -199,10 +200,10 @@ Neden: ${r.reason || "Belirtilmemiş"}`
 
       return message.reply({ embeds: [embed] });
     }
+
   } catch (err) {
     console.error("❌ messageCreate genel hata:", err?.message || err);
   }
 });
 
-// Discord login (token yoksa deneme)
 if (TOKEN) client.login(TOKEN);
