@@ -2,6 +2,7 @@ require("dotenv").config();
 
 const { Client, GatewayIntentBits, Partials, EmbedBuilder } = require("discord.js");
 const { Pool } = require("pg");
+const http = require("http");
 
 /* ================== AYARLAR ================== */
 const TOKEN = process.env.DISCORD_TOKEN;
@@ -17,6 +18,10 @@ const ALLOWED_ROLES = [
   "1074347907685294116", // yonetim
   "1074347907685294114", // moderator
 ];
+
+if (!TOKEN || !DATABASE_URL) {
+  throw new Error("ENV eksik! DISCORD_TOKEN / DATABASE_URL");
+}
 
 /* ================== CLIENT ================== */
 const client = new Client({
@@ -98,7 +103,7 @@ client.on("messageCreate", async (message) => {
   try {
     if (!message.guildId) return;
 
-    /* ==== MEE6 LOG OKU ==== */
+    /* ==== MEE6 LOG ==== */
     if (message.channelId === LOG_CHANNEL_ID &&
         message.author?.id === MEE6_ID) {
 
@@ -176,6 +181,15 @@ Neden: ${r.reason}`
   } catch (err) {
     console.error("❌ HATA:", err);
   }
+});
+
+/* ================== DUMMY HTTP SERVER ================== */
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("OK");
+}).listen(PORT, () => {
+  console.log("🌐 Web ping OK on port", PORT);
 });
 
 /* ================== LOGIN ================== */
