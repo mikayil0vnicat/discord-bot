@@ -1,5 +1,3 @@
-require("dotenv").config();
-
 const { Client, GatewayIntentBits, Partials, EmbedBuilder } = require("discord.js");
 const { Pool } = require("pg");
 const http = require("http");
@@ -20,7 +18,7 @@ const ALLOWED_ROLES = [
 ];
 
 if (!TOKEN || !DATABASE_URL) {
-  throw new Error("ENV eksik! DISCORD_TOKEN / DATABASE_URL");
+  throw new Error("ENV eksik! DISCORD_TOKEN / DATABASE_URL Render'da tanımlı olmalı");
 }
 
 /* ================== CLIENT ================== */
